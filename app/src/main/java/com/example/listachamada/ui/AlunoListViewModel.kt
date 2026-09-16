@@ -2,6 +2,7 @@ package com.example.listachamada.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.listachamada.data.Aluno
 import com.example.listachamada.data.AlunoResumo
 import com.example.listachamada.data.ChamadaRepository
 import kotlinx.coroutines.launch
@@ -17,23 +18,35 @@ class AlunoListViewModel(private val repository: ChamadaRepository) : ViewModel(
 
     fun listarAlunos(turmaId: Long) = repository.listarAlunosComResumo(turmaId, hoje)
 
+    /** Alunos já cadastrados (de outras turmas ou sem turma) que podem ser adicionados aqui. */
+    fun listarAlunosDisponiveis(turmaId: Long) = repository.listarAlunosDisponiveisParaTurma(turmaId)
+
+    /** Cria um aluno totalmente novo e já o coloca nesta turma. */
     fun criarAluno(nome: String, numero: String?, numeroPais: String?, dataNasc: String, turmaId: Long) {
         if (nome.isBlank()) return
         viewModelScope.launch {
-            repository.criarAluno(nome.trim(), numero?:"", numeroPais?:"", dataNasc, turmaId)
+            repository.criarAlunoNaTurma(nome.trim(), numero ?: "", numeroPais ?: "", dataNasc, turmaId)
         }
     }
 
-    fun deletarAluno(aluno: AlunoResumo) {
+    /** Adiciona um aluno JÁ EXISTENTE (de outra turma, por exemplo) a esta turma. */
+    fun matricularAlunoExistente(aluno: Aluno, turmaId: Long) {
         viewModelScope.launch {
-            repository.deletarAluno(aluno.id)
+            repository.matricularAluno(aluno.id, turmaId)
         }
     }
 
-    /** Marca o aluno como presente ou faltoso HOJE. */
-    fun registrarPresenca(aluno: AlunoResumo, presente: Boolean) {
+    /** Remove o aluno só desta turma — ele continua cadastrado e nas outras turmas. */
+    fun removerDaTurma(aluno: AlunoResumo, turmaId: Long) {
         viewModelScope.launch {
-            repository.registrarPresenca(aluno.id, hoje, presente)
+            repository.desmatricularAluno(aluno.id, turmaId)
+        }
+    }
+
+    /** Marca o aluno como presente ou faltoso HOJE, nesta turma. */
+    fun registrarPresenca(aluno: AlunoResumo, turmaId: Long, presente: Boolean) {
+        viewModelScope.launch {
+            repository.registrarPresenca(aluno.id, turmaId, hoje, presente)
         }
     }
 }

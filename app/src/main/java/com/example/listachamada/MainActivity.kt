@@ -2,6 +2,7 @@ package com.example.listachamada
 
 import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenuItem
@@ -39,8 +42,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,8 +62,11 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.listachamada.data.Aluno
 import com.example.listachamada.data.AlunoResumo
+import com.example.listachamada.data.RegistroChamada
 import com.example.listachamada.data.Turma
+import com.example.listachamada.data.TurmaComFrequencia
 import com.example.listachamada.ui.AlunoListViewModel
 import com.example.listachamada.ui.AlunoDetalhesViewModel
 import com.example.listachamada.ui.ConfigViewModel
@@ -93,20 +101,23 @@ fun AppNavHost(navController: NavHostController, factory: ViewModelFactory) {
             val viewModel: ConfigViewModel = viewModel(
                 factory = factory
             )
+            val context = LocalContext.current
 
             val exportLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.CreateDocument("application/octet-stream")
             ) { uri ->
                 if (uri != null) {
-                    viewModel.exportarDatabase(uri)
+                    viewModel.exportarDatabase(uri) { sucesso, erro ->
+                        val texto = if (sucesso) "Backup exportado com sucesso" else "Falha ao exportar: $erro"
+                        Toast.makeText(context, texto, Toast.LENGTH_LONG).show()
+                    }
                 }
             }
-            val context = LocalContext.current
             val importLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.OpenDocument()
             ) { uri ->
                 if (uri != null) {
-                    viewModel.importarDatabase(uri) { sucesso ->
+                    viewModel.importarDatabase(uri) { sucesso, erro ->
 
                         if (sucesso) {
                             val intent = context.packageManager
@@ -118,6 +129,17 @@ fun AppNavHost(navController: NavHostController, factory: ViewModelFactory) {
                             )
 
                             context.startActivity(intent)
+
+                            // Reiniciar só a Activity não é suficiente: o processo
+                            // continua vivo, e a instância de ChamadaApplication
+                            // (com o AppDatabase que acabamos de fechar) também.
+                            // Sem matar o processo, a próxima ação no app (ex.: criar
+                            // turma) tentava usar uma conexão já fechada e crashava.
+                            // Matando o processo aqui, o Android recria tudo do zero
+                            // — incluindo a Application — ao reabrir a tela.
+                            android.os.Process.killProcess(android.os.Process.myPid())
+                        } else {
+                            Toast.makeText(context, "Falha ao importar: $erro", Toast.LENGTH_LONG).show()
                         }
                     }
                 }
@@ -160,19 +182,38 @@ fun AppNavHost(navController: NavHostController, factory: ViewModelFactory) {
                 turmaId = turmaId,
                 turmaNome = turmaNome,
                 aoVoltar = { navController.popBackStack() },
-                aoAbrirFaltas = { aluno ->
-                    navController.navigate("faltas/${aluno.id}/${aluno.nome}")
+                aoAbrirDashboard = { aluno ->
+                    navController.navigate("dashboard/${aluno.id}/${aluno.nome}")
                 },
-
             )
         }
-        composable("faltas/{alunoId}/{alunoNome}") { backStackEntry ->
+        composable("dashboard/{alunoId}/{alunoNome}") { backStackEntry ->
             val alunoId = backStackEntry.arguments?.getString("alunoId")?.toLongOrNull() ?: 0L
             val alunoNome = backStackEntry.arguments?.getString("alunoNome") ?: ""
             val viewModel: AlunoDetalhesViewModel = viewModel(factory = factory)
-            TelaDetalhes(viewModel, alunoId, alunoNome ) {
-                navController.popBackStack()
-            }
+            TelaDashboardAluno(
+                viewModel = viewModel,
+                alunoId = alunoId,
+                alunoNome = alunoNome,
+                aoVoltar = { navController.popBackStack() },
+                aoAbrirFaltasDaTurma = { turma ->
+                    navController.navigate("faltas/${alunoId}/${turma.id}/${turma.nome}")
+                },
+                aoExcluirAluno = { navController.popBackStack() }
+            )
+        }
+        composable("faltas/{alunoId}/{turmaId}/{turmaNome}") { backStackEntry ->
+            val alunoId = backStackEntry.arguments?.getString("alunoId")?.toLongOrNull() ?: 0L
+            val turmaId = backStackEntry.arguments?.getString("turmaId")?.toLongOrNull() ?: 0L
+            val turmaNome = backStackEntry.arguments?.getString("turmaNome") ?: ""
+            val viewModel: AlunoDetalhesViewModel = viewModel(factory = factory)
+            TelaFaltasDaTurma(
+                viewModel = viewModel,
+                alunoId = alunoId,
+                turmaId = turmaId,
+                turmaNome = turmaNome,
+                aoVoltar = { navController.popBackStack() }
+            )
         }
     }
 }
@@ -238,6 +279,13 @@ fun TelaConfiguracoes(
             ) {
                 Text("Importar banco de dados")
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Importar substitui todos os dados atuais pelos do arquivo escolhido. O app reinicia sozinho depois.",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
@@ -369,13 +417,25 @@ fun TelaAlunos(
     turmaId: Long,
     turmaNome: String,
     aoVoltar: () -> Unit,
-    aoAbrirFaltas: (AlunoResumo) -> Unit
+    aoAbrirDashboard: (AlunoResumo) -> Unit
 ) {
     val alunos by viewModel.listarAlunos(turmaId).collectAsState(initial = emptyList())
     var nomeNovoAluno by remember { mutableStateOf("") }
     var novaDataNasc by remember { mutableStateOf("") }
     var novoNumero by remember { mutableStateOf("") }
     var novoNumeroPais by remember { mutableStateOf("") }
+    var mostrarDialogAdicionarExistente by remember { mutableStateOf(false) }
+
+    if (mostrarDialogAdicionarExistente) {
+        val disponiveis by viewModel.listarAlunosDisponiveis(turmaId).collectAsState(initial = emptyList())
+        DialogAdicionarAlunoExistente(
+            alunos = disponiveis,
+            aoSelecionar = { aluno ->
+                viewModel.matricularAlunoExistente(aluno, turmaId)
+            },
+            aoFechar = { mostrarDialogAdicionarExistente = false }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -385,11 +445,23 @@ fun TelaAlunos(
                     IconButton(onClick = aoVoltar) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Voltar")
                     }
+                },
+                actions = {
+                    IconButton(onClick = { mostrarDialogAdicionarExistente = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "Adicionar aluno já cadastrado")
+                    }
                 }
             )
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp)) {
+
+            Text(
+                text = "Cadastrar aluno novo",
+                style = MaterialTheme.typography.titleSmall
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
             Row(verticalAlignment = Alignment.CenterVertically,
                ) {
                 OutlinedTextField(
@@ -424,20 +496,31 @@ fun TelaAlunos(
                     IconButton(onClick = {
                         viewModel.criarAluno(nome = nomeNovoAluno, numero = novoNumero, numeroPais = novoNumeroPais, dataNasc = novaDataNasc, turmaId = turmaId )
                         nomeNovoAluno = ""
+                        novaDataNasc = ""
+                        novoNumero = ""
+                        novoNumeroPais = ""
                     }) {
                         Icon(Icons.Default.Add, contentDescription = "Adicionar aluno")
                     }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Ou toque no ícone de pessoa no topo da tela para adicionar um aluno que já existe em outra turma.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
             Spacer(modifier = Modifier.height(16.dp))
+            Divider()
+            Spacer(modifier = Modifier.height(8.dp))
 
             LazyColumn {
                 items(alunos) { aluno ->
                     LinhaAluno(
                         aluno = aluno,
-                        onRegistrar = { presente -> viewModel.registrarPresenca(aluno, presente) },
-                        onExcluir = { viewModel.deletarAluno(aluno) },
-                        onAbrirFaltas = { aoAbrirFaltas(aluno) }
+                        onRegistrar = { presente -> viewModel.registrarPresenca(aluno, turmaId, presente) },
+                        onRemoverDaTurma = { viewModel.removerDaTurma(aluno, turmaId) },
+                        onAbrirDashboard = { aoAbrirDashboard(aluno) }
                     )
                     Divider()
                 }
@@ -447,11 +530,44 @@ fun TelaAlunos(
 }
 
 @Composable
+fun DialogAdicionarAlunoExistente(
+    alunos: List<Aluno>,
+    aoSelecionar: (Aluno) -> Unit,
+    aoFechar: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = aoFechar,
+        title = { Text("Adicionar aluno existente") },
+        text = {
+            if (alunos.isEmpty()) {
+                Text("Todos os alunos já cadastrados já estão nesta turma.")
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                    items(alunos) { aluno ->
+                        ListItem(
+                            headlineContent = { Text(aluno.nome) },
+                            modifier = Modifier.clickable { aoSelecionar(aluno) },
+                            trailingContent = {
+                                Icon(Icons.Default.Add, contentDescription = "Adicionar")
+                            }
+                        )
+                        Divider()
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = aoFechar) { Text("Fechar") }
+        }
+    )
+}
+
+@Composable
 fun LinhaAluno(
     aluno: AlunoResumo,
     onRegistrar: (presente: Boolean) -> Unit,
-    onExcluir: () -> Unit,
-    onAbrirFaltas: () -> Unit
+    onRemoverDaTurma: () -> Unit,
+    onAbrirDashboard: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -462,7 +578,7 @@ fun LinhaAluno(
         Column(
             modifier = Modifier
                 .weight(1f)
-                .clickable { onAbrirFaltas() }
+                .clickable { onAbrirDashboard() }
         ) {
             Text(aluno.nome, style = MaterialTheme.typography.bodyLarge)
             Text(
@@ -471,7 +587,7 @@ fun LinhaAluno(
             )
         }
 
-        // Cor da bolinha = status de HOJE, vindo direto do banco:
+        // Cor da bolinha = status de HOJE nesta turma:
         // verde = presente, vermelho = faltou, cinza = ainda não teve chamada hoje.
         val corBolinha = when (aluno.statusHoje) {
             true -> Color(0xFF2E7D32)
@@ -493,141 +609,187 @@ fun LinhaAluno(
         )
         Spacer(modifier = Modifier.width(12.dp))
 
-        IconButton(onClick = onExcluir) {
-            Icon(Icons.Default.Delete, contentDescription = "Excluir aluno")
+        IconButton(onClick = onRemoverDaTurma) {
+            Icon(Icons.Default.Delete, contentDescription = "Remover aluno desta turma")
         }
     }
 }
 
+/**
+ * Dashboard do aluno: dados cadastrais, TODAS as turmas em que ele está
+ * matriculado (com presenças/faltas em cada uma) e os problemas registrados.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TelaDetalhes(
+fun TelaDashboardAluno(
     viewModel: AlunoDetalhesViewModel,
     alunoId: Long,
     alunoNome: String,
-    aoVoltar: () -> Unit
+    aoVoltar: () -> Unit,
+    aoAbrirFaltasDaTurma: (TurmaComFrequencia) -> Unit,
+    aoExcluirAluno: () -> Unit
 ) {
-    val faltas by viewModel.listarFaltas(alunoId).collectAsState(initial = emptyList())
+    LaunchedEffect(alunoId) { viewModel.carregarAluno(alunoId) }
+
+    val aluno by viewModel.aluno.collectAsState()
+    val turmas by viewModel.listarTurmasDoAluno(alunoId).collectAsState(initial = emptyList())
     val problemas by viewModel.listarProblemas(alunoId).collectAsState(initial = emptyList())
     var novoProblema by remember { mutableStateOf("") }
+    var mostrarConfirmacaoExclusao by remember { mutableStateOf(false) }
+
+    if (mostrarConfirmacaoExclusao) {
+        AlertDialog(
+            onDismissRequest = { mostrarConfirmacaoExclusao = false },
+            title = { Text("Excluir aluno") },
+            text = { Text("Isso apaga o cadastro de $alunoNome de TODAS as turmas e todo o histórico de chamada dele. Essa ação não pode ser desfeita.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    mostrarConfirmacaoExclusao = false
+                    viewModel.deletarAluno(alunoId, aoExcluirAluno)
+                }) { Text("Excluir") }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarConfirmacaoExclusao = false }) { Text("Cancelar") }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("${alunoNome}") },
+                title = { Text(alunoNome) },
                 navigationIcon = {
                     IconButton(onClick = aoVoltar) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Voltar"
-                        )
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Voltar")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { mostrarConfirmacaoExclusao = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Excluir aluno")
                     }
                 }
             )
         }
     ) { padding ->
-
         LazyColumn(
             modifier = Modifier
                 .padding(padding)
-                .padding(horizontal = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 16.dp)
         ) {
+            // =========================
+            // DADOS DO ALUNO
+            // =========================
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Dados", style = MaterialTheme.typography.titleLarge)
+                Spacer(modifier = Modifier.height(8.dp))
+                aluno?.let { a ->
+                    Text("Data de nascimento: ${a.dataNascimento}", style = MaterialTheme.typography.bodyMedium)
+                    if (a.numero.isNotBlank()) {
+                        Text("Número: ${a.numero}", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    if (a.numeroPais.isNotBlank()) {
+                        Text("Número dos pais/responsáveis: ${a.numeroPais}", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
+            // =========================
+            // TURMAS
+            // =========================
+            item {
+                Text("Turmas", style = MaterialTheme.typography.titleLarge)
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            if (turmas.isEmpty()) {
+                item { Text("Este aluno não está em nenhuma turma.", style = MaterialTheme.typography.bodyMedium) }
+            } else {
+                items(turmas) { turma ->
+                    ListItem(
+                        headlineContent = { Text(turma.nome) },
+                        supportingContent = { Text("Presenças: ${turma.presencas}  •  Faltas: ${turma.faltas}") },
+                        modifier = Modifier.clickable { aoAbrirFaltasDaTurma(turma) }
+                    )
+                    Divider()
+                }
+            }
 
             // =========================
             // PROBLEMAS
             // =========================
             item {
+                Spacer(modifier = Modifier.height(24.dp))
                 OutlinedTextField(
                     value = novoProblema,
                     onValueChange = { novoProblema = it },
                     label = { Text("Problema") },
                     modifier = Modifier.fillMaxWidth(),
-
                 )
-
+                Spacer(modifier = Modifier.height(8.dp))
                 Button(
                     onClick = {
                         if (novoProblema.isNotBlank()) {
-                            viewModel.inserirProblemas(
-                                alunoId,
-                                novoProblema
-                            )
-
+                            viewModel.inserirProblemas(alunoId, novoProblema)
                             novoProblema = ""
                         }
                     }
                 ) {
                     Text("Adicionar problema")
                 }
-            }
-            item {
+
                 Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "Problemas",
-                    style = MaterialTheme.typography.titleLarge
-                )
-
+                Text("Problemas", style = MaterialTheme.typography.titleLarge)
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
             if (problemas.isEmpty()) {
-
-                item {
-                    Text(
-                        text = "Nenhum problema cadastrado.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-
+                item { Text("Nenhum problema cadastrado.", style = MaterialTheme.typography.bodyMedium) }
             } else {
-
                 items(problemas) { problema ->
-
-                    ListItem(
-                        headlineContent = {
-                            Text(problema.descricao)
-                        }
-                    )
-
+                    ListItem(headlineContent = { Text(problema.descricao) })
                     Divider()
                 }
             }
 
-            // =========================
-            // FALTAS
-            // =========================
+            item { Spacer(modifier = Modifier.height(24.dp)) }
+        }
+    }
+}
 
-            item {
-                Spacer(modifier = Modifier.height(24.dp))
+/** Lista as datas de falta de um aluno numa turma específica. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TelaFaltasDaTurma(
+    viewModel: AlunoDetalhesViewModel,
+    alunoId: Long,
+    turmaId: Long,
+    turmaNome: String,
+    aoVoltar: () -> Unit
+) {
+    val faltas by viewModel.listarFaltas(alunoId, turmaId).collectAsState(initial = emptyList())
 
-                Text(
-                    text = "Faltas",
-                    style = MaterialTheme.typography.titleLarge
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            if (faltas.isEmpty()) {
-
-                item {
-                    Text(
-                        text = "Nenhuma falta registrada.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Faltas em $turmaNome") },
+                navigationIcon = {
+                    IconButton(onClick = aoVoltar) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Voltar")
+                    }
                 }
-
+            )
+        }
+    ) { padding ->
+        LazyColumn(modifier = Modifier.padding(padding).padding(horizontal = 16.dp)) {
+            if (faltas.isEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Nenhuma falta registrada nesta turma.", style = MaterialTheme.typography.bodyMedium)
+                }
             } else {
-
-                items(faltas) { registro ->
-
-                    ListItem(
-                        headlineContent = {
-                            Text(formatarData(registro.data))
-                        }
-                    )
-
+                items(faltas) { registro: RegistroChamada ->
+                    ListItem(headlineContent = { Text(formatarData(registro.data)) })
                     Divider()
                 }
             }

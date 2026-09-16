@@ -14,6 +14,6 @@ interface RegistroChamadaDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun registrar(registro: RegistroChamada)
 
-    @Query("SELECT * FROM registros_chamada WHERE alunoId = :alunoId AND presente = 0 ORDER BY data DESC")
-    fun listarFaltas(alunoId: Long): Flow<List<RegistroChamada>>
+    @Query("SELECT * FROM registros_chamada WHERE alunoId = :alunoId AND turmaId = :turmaId AND presente = 0 ORDER BY data DESC")
+    fun listarFaltas(alunoId: Long, turmaId: Long): Flow<List<RegistroChamada>>
 }
